@@ -150,6 +150,10 @@ def required_bottom_height(line_count, fontsize):
     return TEXT_TOP_PADDING + TEXT_BOTTOM_PADDING + (line_count * line_height(fontsize))
 
 
+def sort_text(value):
+    return str(value).strip().casefold()
+
+
 def html_color(color):
     r, g, b = (int(max(0, min(1, c)) * 255) for c in color)
     return f"#{r:02x}{g:02x}{b:02x}"
@@ -270,6 +274,8 @@ def main():
     dst_pdf = fitz.open()
 
     try:
+        page_records = []
+
         for sayfa_num in range(src_pdf.page_count):
             src_page = src_pdf[sayfa_num]
             rect = src_page.rect
@@ -297,15 +303,32 @@ def main():
             label_font_size = FONT_SIZE
 
             if not matched_sn:
-                dst_page = dst_pdf.new_page(width=w, height=h + EXTRA_BOTTOM_PT)
-                dst_page.show_pdf_page(fitz.Rect(0, 0, w, h), src_pdf, sayfa_num)
+                page_records.append({
+                    "page_index": sayfa_num,
+                    "width": w,
+                    "height": h,
+                    "bottom_height": EXTRA_BOTTOM_PT,
+                    "label_lines": [],
+                    "label_font_size": FONT_SIZE,
+                    "sort_key": (1, "", "", sayfa_num),
+                })
                 continue
 
             urun_sirasi_df = siparis_gruplari.get(matched_sn, pd.DataFrame())
             if urun_sirasi_df.empty:
-                dst_page = dst_pdf.new_page(width=w, height=h + EXTRA_BOTTOM_PT)
-                dst_page.show_pdf_page(fitz.Rect(0, 0, w, h), src_pdf, sayfa_num)
+                page_records.append({
+                    "page_index": sayfa_num,
+                    "width": w,
+                    "height": h,
+                    "bottom_height": EXTRA_BOTTOM_PT,
+                    "label_lines": [],
+                    "label_font_size": FONT_SIZE,
+                    "sort_key": (1, "", "", sayfa_num),
+                })
                 continue
+
+            first_label_text = ""
+            first_article_code = ""
 
             for _, satir in urun_sirasi_df.iterrows():
                 orijinal_urun_kodu = str(satir.get('Article code', '')).strip()
@@ -323,6 +346,10 @@ def main():
                 if adet_int > 1:
                     item_segments.append((f" {adet_int}x", FONT_BOLD))
 
+                if not first_label_text:
+                    first_label_text = str(kisa_kod)
+                    first_article_code = orijinal_urun_kodu
+
                 items.append(item_segments)
 
                 rapor_dict[orijinal_urun_kodu] = rapor_dict.get(orijinal_urun_kodu, 0) + max(adet_int, 0)
@@ -331,18 +358,40 @@ def main():
             label_lines, label_font_size = build_label_lines(items, max_text_width)
             bottom_height = max(EXTRA_BOTTOM_PT, required_bottom_height(len(label_lines), label_font_size))
 
-            dst_page = dst_pdf.new_page(width=w, height=h + bottom_height)
+            page_records.append({
+                "page_index": sayfa_num,
+                "width": w,
+                "height": h,
+                "bottom_height": bottom_height,
+                "label_lines": label_lines,
+                "label_font_size": label_font_size,
+                "sort_key": (
+                    0,
+                    sort_text(first_label_text),
+                    sort_text(first_article_code),
+                    sort_text(matched_sn),
+                    sayfa_num,
+                ),
+            })
+
+        for record in sorted(page_records, key=lambda item: item["sort_key"]):
+            sayfa_num = record["page_index"]
+            w = record["width"]
+            h = record["height"]
+
+            dst_page = dst_pdf.new_page(width=w, height=h + record["bottom_height"])
             dst_page.show_pdf_page(fitz.Rect(0, 0, w, h), src_pdf, sayfa_num)
 
-            draw_label_lines(
-                dst_page,
-                TEXT_X,
-                h + TEXT_TOP_PADDING,
-                max_text_width,
-                label_lines,
-                fontsize=label_font_size,
-                color=FONT_COLOR,
-            )
+            if record["label_lines"]:
+                draw_label_lines(
+                    dst_page,
+                    TEXT_X,
+                    h + TEXT_TOP_PADDING,
+                    max(1, w - (TEXT_X * 2)),
+                    record["label_lines"],
+                    fontsize=record["label_font_size"],
+                    color=FONT_COLOR,
+                )
 
         bugun = datetime.today().strftime("%d.%m.%Y")
         varsayilan_ad = f"{bugun} Yazılı Etiketler.pdf"
