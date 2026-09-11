@@ -1,0 +1,9 @@
+{
+    "extra_bottom_pt": 25,
+    "text_x": 10,
+    "text_top_padding": 4,
+    "text_bottom_padding": 4,
+    "font_size": 8,
+    "line_height_factor": 1.25,
+    "sort_labels_by_first_product": true
+}

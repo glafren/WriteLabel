@@ -1,6 +1,8 @@
 import re
 import os
 import html
+import json
+import sys
 import pandas as pd
 import fitz  # PyMuPDF
 from tkinter import Tk, filedialog, messagebox
@@ -9,14 +11,24 @@ from datetime import datetime
 # -------------------------------------------------
 # AYARLANABİLİR SABİTLER
 # -------------------------------------------------
-EXTRA_BOTTOM_PT = 25
+DEFAULT_SETTINGS = {
+    "extra_bottom_pt": 25,
+    "text_x": 10,
+    "text_top_padding": 4,
+    "text_bottom_padding": 4,
+    "font_size": 8,
+    "line_height_factor": 1.25,
+    "sort_labels_by_first_product": True,
+}
 
-TEXT_X = 10
-TEXT_TOP_PADDING = 4
-TEXT_BOTTOM_PADDING = 4
+EXTRA_BOTTOM_PT = DEFAULT_SETTINGS["extra_bottom_pt"]
 
-FONT_SIZE = 8
-LINE_HEIGHT_FACTOR = 1.25
+TEXT_X = DEFAULT_SETTINGS["text_x"]
+TEXT_TOP_PADDING = DEFAULT_SETTINGS["text_top_padding"]
+TEXT_BOTTOM_PADDING = DEFAULT_SETTINGS["text_bottom_padding"]
+
+FONT_SIZE = DEFAULT_SETTINGS["font_size"]
+LINE_HEIGHT_FACTOR = DEFAULT_SETTINGS["line_height_factor"]
 FONT_COLOR = (0, 0, 0)
 
 FONT_REGULAR = "regular"
@@ -32,6 +44,73 @@ FONT_OBJECTS = {
     FONT_BOLD: fitz.Font(fontfile=FONT_BOLD_FILE),
 }
 FONT_ARCHIVE = fitz.Archive(WINDOWS_FONT_DIR)
+
+
+def uygulama_klasoru():
+    if getattr(sys, "frozen", False):
+        return os.path.dirname(sys.executable)
+    return os.path.dirname(os.path.abspath(__file__))
+
+
+def ayar_dosyasi_yolu():
+    return os.path.join(uygulama_klasoru(), "ayarlar.json")
+
+
+def ayarlari_oku():
+    yol = ayar_dosyasi_yolu()
+    if not os.path.exists(yol):
+        with open(yol, "w", encoding="utf-8") as f:
+            json.dump(DEFAULT_SETTINGS, f, ensure_ascii=False, indent=4)
+        return DEFAULT_SETTINGS.copy()
+
+    with open(yol, "r", encoding="utf-8") as f:
+        kullanici_ayarlari = json.load(f)
+
+    ayarlar = DEFAULT_SETTINGS.copy()
+    if isinstance(kullanici_ayarlari, dict):
+        ayarlar.update(kullanici_ayarlari)
+
+    return ayarlar
+
+
+def pozitif_sayi(value, default):
+    try:
+        value = float(value)
+        if value > 0:
+            return value
+    except Exception:
+        pass
+    return default
+
+
+def ayarlari_uygula(ayarlar):
+    global EXTRA_BOTTOM_PT, TEXT_X, TEXT_TOP_PADDING, TEXT_BOTTOM_PADDING
+    global FONT_SIZE, LINE_HEIGHT_FACTOR
+
+    EXTRA_BOTTOM_PT = pozitif_sayi(
+        ayarlar.get("extra_bottom_pt"),
+        DEFAULT_SETTINGS["extra_bottom_pt"],
+    )
+    TEXT_X = pozitif_sayi(
+        ayarlar.get("text_x"),
+        DEFAULT_SETTINGS["text_x"],
+    )
+    TEXT_TOP_PADDING = pozitif_sayi(
+        ayarlar.get("text_top_padding"),
+        DEFAULT_SETTINGS["text_top_padding"],
+    )
+    TEXT_BOTTOM_PADDING = pozitif_sayi(
+        ayarlar.get("text_bottom_padding"),
+        DEFAULT_SETTINGS["text_bottom_padding"],
+    )
+    FONT_SIZE = pozitif_sayi(
+        ayarlar.get("font_size"),
+        DEFAULT_SETTINGS["font_size"],
+    )
+    LINE_HEIGHT_FACTOR = pozitif_sayi(
+        ayarlar.get("line_height_factor"),
+        DEFAULT_SETTINGS["line_height_factor"],
+    )
 
 
 def oku_siparis_dosyasi_yolundan(yol: str) -> pd.DataFrame:
@@ -209,6 +288,18 @@ def main():
     root = Tk()
     root.withdraw()
 
+    try:
+        ayarlar = ayarlari_oku()
+        ayarlari_uygula(ayarlar)
+    except Exception as e:
+        messagebox.showerror("Hata", f"Ayar dosyası okunamadı:\n{e}")
+        return
+
+    siralama_aktif = bool(ayarlar.get(
+        "sort_labels_by_first_product",
+        DEFAULT_SETTINGS["sort_labels_by_first_product"],
+    ))
+
     siparis_dosyasi = filedialog.askopenfilename(
         title="Sipariş Listesini Seç",
         filetypes=[
@@ -310,7 +401,7 @@ def main():
                     "bottom_height": EXTRA_BOTTOM_PT,
                     "label_lines": [],
                     "label_font_size": FONT_SIZE,
-                    "sort_key": (1, "", "", sayfa_num),
+                    "sort_key": (1, sayfa_num) if siralama_aktif else (sayfa_num,),
                 })
                 continue
 
@@ -323,7 +414,7 @@ def main():
                     "bottom_height": EXTRA_BOTTOM_PT,
                     "label_lines": [],
                     "label_font_size": FONT_SIZE,
-                    "sort_key": (1, "", "", sayfa_num),
+                    "sort_key": (1, sayfa_num) if siralama_aktif else (sayfa_num,),
                 })
                 continue
 
@@ -365,7 +456,7 @@ def main():
                 "bottom_height": bottom_height,
                 "label_lines": label_lines,
                 "label_font_size": label_font_size,
-                "sort_key": (
+                "sort_key": (sayfa_num,) if not siralama_aktif else (
                     0,
                     sort_text(first_label_text),
                     sort_text(first_article_code),
