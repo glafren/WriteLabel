@@ -1,4 +1,6 @@
 import re
+import os
+import html
 import pandas as pd
 import fitz  # PyMuPDF
 from tkinter import Tk, filedialog, messagebox
@@ -10,16 +12,27 @@ from datetime import datetime
 EXTRA_BOTTOM_PT = 25
 
 TEXT_X = 10
-TEXT_Y_IN_PADDING = 10
+TEXT_TOP_PADDING = 4
+TEXT_BOTTOM_PADDING = 4
 
 FONT_SIZE = 8
+MIN_FONT_SIZE = 5
+LINE_HEIGHT_FACTOR = 1.25
 FONT_COLOR = (0, 0, 0)
 
-# Sürüm bağımsız Base-14 font adları
-FONT_REGULAR = "Helvetica"
-FONT_BOLD = "Helvetica-Bold"
+FONT_REGULAR = "regular"
+FONT_BOLD = "bold"
+WINDOWS_FONT_DIR = r"C:\Windows\Fonts"
+FONT_REGULAR_FILE = os.path.join(WINDOWS_FONT_DIR, "arial.ttf")
+FONT_BOLD_FILE = os.path.join(WINDOWS_FONT_DIR, "arialbd.ttf")
 
 SHIPMENT_REGEX = re.compile(r"\b(\d{4}\s*\d{4}\s*-\s*\d{4}\s*-\s*\d+)\b")
+
+FONT_OBJECTS = {
+    FONT_REGULAR: fitz.Font(fontfile=FONT_REGULAR_FILE),
+    FONT_BOLD: fitz.Font(fontfile=FONT_BOLD_FILE),
+}
+FONT_ARCHIVE = fitz.Archive(WINDOWS_FONT_DIR)
 
 
 def oku_siparis_dosyasi_yolundan(yol: str) -> pd.DataFrame:
@@ -64,17 +77,107 @@ def extract_shipment_candidates_from_text(page_text: str) -> set[str]:
     return found
 
 
-def draw_segments(page, x, y, segments, fontsize, color):
+def segment_width(segment, fontsize):
+    text, font_style = segment
+    return FONT_OBJECTS[font_style].text_length(str(text), fontsize=fontsize)
+
+
+def segments_width(segments, fontsize):
+    return sum(segment_width(segment, fontsize) for segment in segments)
+
+
+def line_height(fontsize):
+    return fontsize * LINE_HEIGHT_FACTOR
+
+
+def build_label_lines(items, max_width):
+    flat_segments = []
+    for index, item_segments in enumerate(items):
+        if index > 0:
+            flat_segments.append((" + ", FONT_REGULAR))
+        flat_segments.extend(item_segments)
+
+    for fontsize in range(FONT_SIZE, MIN_FONT_SIZE - 1, -1):
+        if segments_width(flat_segments, fontsize) <= max_width:
+            return [flat_segments], fontsize
+
+    lines = []
+    current_line = []
+    current_width = 0
+
+    for item_segments in items:
+        item_width = segments_width(item_segments, MIN_FONT_SIZE)
+        separator = [(" + ", FONT_REGULAR)] if current_line else []
+        separator_width = segments_width(separator, MIN_FONT_SIZE)
+
+        if current_line and current_width + separator_width + item_width > max_width:
+            lines.append(current_line)
+            current_line = list(item_segments)
+            current_width = item_width
+        else:
+            current_line.extend(separator)
+            current_line.extend(item_segments)
+            current_width += separator_width + item_width
+
+    if current_line:
+        lines.append(current_line)
+
+    return lines, MIN_FONT_SIZE
+
+
+def required_bottom_height(line_count, fontsize):
+    return TEXT_TOP_PADDING + TEXT_BOTTOM_PADDING + (line_count * line_height(fontsize))
+
+
+def html_color(color):
+    r, g, b = (int(max(0, min(1, c)) * 255) for c in color)
+    return f"#{r:02x}{g:02x}{b:02x}"
+
+
+def lines_to_html(lines):
+    html_lines = []
+    for line in lines:
+        parts = []
+        for text, font_style in line:
+            safe_text = html.escape(str(text))
+            if font_style == FONT_BOLD:
+                parts.append(f"<strong>{safe_text}</strong>")
+            else:
+                parts.append(safe_text)
+        html_lines.append(f"<div>{''.join(parts)}</div>")
+    return "".join(html_lines)
+
+
+def draw_label_lines(page, x, top, width, lines, fontsize, color):
+    css = f"""
+    @font-face {{
+        font-family: ArialLocal;
+        src: url(arial.ttf);
+    }}
+    @font-face {{
+        font-family: ArialLocal;
+        font-weight: bold;
+        src: url(arialbd.ttf);
+    }}
+    * {{
+        font-family: ArialLocal;
+        font-size: {fontsize}pt;
+        line-height: {LINE_HEIGHT_FACTOR};
+        color: {html_color(color)};
+        margin: 0;
+        padding: 0;
+    }}
+    div {{
+        white-space: nowrap;
+    }}
     """
-    segments: [(text, fontname), ...]
-    Aynı satıra farklı fontlarla yan yana yazar.
-    """
-    cur_x = x
-    for text, fontname in segments:
-        if not text:
-            continue
-        page.insert_text((cur_x, y), text, fontsize=fontsize, color=color, fontname=fontname)
-        cur_x += fitz.get_text_length(text, fontname=fontname, fontsize=fontsize)
+    rect = fitz.Rect(
+        x,
+        top,
+        x + width,
+        top + required_bottom_height(len(lines), fontsize),
+    )
+    page.insert_htmlbox(rect, lines_to_html(lines), css=css, archive=FONT_ARCHIVE)
 
 
 def main():
@@ -151,9 +254,6 @@ def main():
             rect = src_page.rect
             w, h = rect.width, rect.height
 
-            dst_page = dst_pdf.new_page(width=w, height=h + EXTRA_BOTTOM_PT)
-            dst_page.show_pdf_page(fitz.Rect(0, 0, w, h), src_pdf, sayfa_num)
-
             page_text = src_page.get_text() or ""
 
             candidates = extract_shipment_candidates_from_text(page_text)
@@ -171,15 +271,20 @@ def main():
                         matched_sn = sn
                         break
 
+            items = []
+            label_lines = []
+            label_font_size = FONT_SIZE
+
             if not matched_sn:
+                dst_page = dst_pdf.new_page(width=w, height=h + EXTRA_BOTTOM_PT)
+                dst_page.show_pdf_page(fitz.Rect(0, 0, w, h), src_pdf, sayfa_num)
                 continue
 
             urun_sirasi_df = siparis_gruplari.get(matched_sn, pd.DataFrame())
             if urun_sirasi_df.empty:
+                dst_page = dst_pdf.new_page(width=w, height=h + EXTRA_BOTTOM_PT)
+                dst_page.show_pdf_page(fitz.Rect(0, 0, w, h), src_pdf, sayfa_num)
                 continue
-
-            segments = []
-            first = True
 
             for _, satir in urun_sirasi_df.iterrows():
                 orijinal_urun_kodu = str(satir.get('Article code', '')).strip()
@@ -192,22 +297,31 @@ def main():
                 except Exception:
                     adet_int = 0
 
-                if not first:
-                    segments.append((" + ", FONT_REGULAR))
-                first = False
+                item_segments = [(str(kisa_kod), FONT_REGULAR)]
 
-                segments.append((str(kisa_kod), FONT_REGULAR))
-
-                # SADECE adet kısmı kalın
                 if adet_int > 1:
-                    segments.append((f" {adet_int}x", FONT_BOLD))
+                    item_segments.append((f" {adet_int}x", FONT_BOLD))
+
+                items.append(item_segments)
 
                 rapor_dict[orijinal_urun_kodu] = rapor_dict.get(orijinal_urun_kodu, 0) + max(adet_int, 0)
 
-            x_koord = TEXT_X
-            y_koord = h + TEXT_Y_IN_PADDING
+            max_text_width = max(1, w - (TEXT_X * 2))
+            label_lines, label_font_size = build_label_lines(items, max_text_width)
+            bottom_height = max(EXTRA_BOTTOM_PT, required_bottom_height(len(label_lines), label_font_size))
 
-            draw_segments(dst_page, x_koord, y_koord, segments, fontsize=FONT_SIZE, color=FONT_COLOR)
+            dst_page = dst_pdf.new_page(width=w, height=h + bottom_height)
+            dst_page.show_pdf_page(fitz.Rect(0, 0, w, h), src_pdf, sayfa_num)
+
+            draw_label_lines(
+                dst_page,
+                TEXT_X,
+                h + TEXT_TOP_PADDING,
+                max_text_width,
+                label_lines,
+                fontsize=label_font_size,
+                color=FONT_COLOR,
+            )
 
         bugun = datetime.today().strftime("%d.%m.%Y")
         varsayilan_ad = f"{bugun} Yazılı Etiketler.pdf"
