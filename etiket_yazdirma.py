@@ -16,7 +16,6 @@ TEXT_TOP_PADDING = 4
 TEXT_BOTTOM_PADDING = 4
 
 FONT_SIZE = 8
-MIN_FONT_SIZE = 5
 LINE_HEIGHT_FACTOR = 1.25
 FONT_COLOR = (0, 0, 0)
 
@@ -90,39 +89,61 @@ def line_height(fontsize):
     return fontsize * LINE_HEIGHT_FACTOR
 
 
-def build_label_lines(items, max_width):
-    flat_segments = []
-    for index, item_segments in enumerate(items):
-        if index > 0:
-            flat_segments.append((" + ", FONT_REGULAR))
-        flat_segments.extend(item_segments)
+def split_text_for_width(text, font_style, max_width, fontsize):
+    words = str(text).split(" ")
+    lines = []
+    current = ""
 
-    for fontsize in range(FONT_SIZE, MIN_FONT_SIZE - 1, -1):
-        if segments_width(flat_segments, fontsize) <= max_width:
-            return [flat_segments], fontsize
+    for word in words:
+        candidate = word if not current else f"{current} {word}"
+        if current and segment_width((candidate, font_style), fontsize) > max_width:
+            lines.append([(current, font_style)])
+            current = word
+        else:
+            current = candidate
+
+    if current:
+        lines.append([(current, font_style)])
+
+    return lines or [[("", font_style)]]
+
+
+def wrap_segments_to_width(segments, max_width, fontsize):
+    if segments_width(segments, fontsize) <= max_width:
+        return [segments]
 
     lines = []
-    current_line = []
-    current_width = 0
+    current = []
 
-    for item_segments in items:
-        item_width = segments_width(item_segments, MIN_FONT_SIZE)
-        separator = [(" + ", FONT_REGULAR)] if current_line else []
-        separator_width = segments_width(separator, MIN_FONT_SIZE)
-
-        if current_line and current_width + separator_width + item_width > max_width:
-            lines.append(current_line)
-            current_line = list(item_segments)
-            current_width = item_width
+    for text, font_style in segments:
+        text = str(text)
+        candidate = current + [(text, font_style)]
+        if current and segments_width(candidate, fontsize) > max_width:
+            lines.append(current)
+            current = [(text.lstrip(), font_style)]
         else:
-            current_line.extend(separator)
-            current_line.extend(item_segments)
-            current_width += separator_width + item_width
+            current = candidate
 
-    if current_line:
-        lines.append(current_line)
+    if current:
+        lines.append(current)
 
-    return lines, MIN_FONT_SIZE
+    wrapped_lines = []
+    for line in lines:
+        if segments_width(line, fontsize) <= max_width:
+            wrapped_lines.append(line)
+            continue
+
+        for text, font_style in line:
+            wrapped_lines.extend(split_text_for_width(text, font_style, max_width, fontsize))
+
+    return wrapped_lines
+
+
+def build_label_lines(items, max_width):
+    lines = []
+    for item_segments in items:
+        lines.extend(wrap_segments_to_width(item_segments, max_width, FONT_SIZE))
+    return lines, FONT_SIZE
 
 
 def required_bottom_height(line_count, fontsize):
